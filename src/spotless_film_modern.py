@@ -60,6 +60,10 @@ class SpotlessFilmModern:
         
         # Initialize split view position
         self.split_position = 0.5  # Default to middle
+
+        # Undo stack for processed results (each entry: processed_image + preview)
+        self._processed_history = []  # list of (processed_image, preview_processed_image)
+        self._MAX_UNDO = 5
         
         # Apply professional theme (skip for CustomTkinter compatibility)
         # self.theme = SimpleModernTheme(self.root)
@@ -218,6 +222,14 @@ class SpotlessFilmModern:
                                        hover_color="#5A5A5A")
         self.import_btn.pack(fill="x", pady=(0, 5))
         self._importing = False
+        
+        # Batch folder button
+        self.batch_btn = ctk.CTkButton(parent, text="📂 Procesar Carpeta",
+                                      command=self.process_folder,
+                                      font=ctk.CTkFont(size=12),
+                                      height=32, fg_color="#3A6A3A",
+                                      hover_color="#4A8A4A")
+        self.batch_btn.pack(fill="x", pady=(0, 5))
     
     def create_detection_section(self, parent):
         """Create detection section content matching macOS design"""
@@ -331,17 +343,27 @@ class SpotlessFilmModern:
             self.canvas.bind('<Button-4>', self.on_mouse_wheel)  # Linux scroll up
             self.canvas.bind('<Button-5>', self.on_mouse_wheel)  # Linux scroll down
             self.canvas.bind('<Motion>', self.on_mouse_motion)  # For brush cursor
+            self.canvas.bind('<Leave>', self._on_canvas_leave)  # Restore cursor on leave
+            # Fix 1: register canvas as drag-and-drop target
+            try:
+                self.canvas.drop_target_register('DND_Files')
+                self.canvas.dnd_bind('<<Drop>>', self._on_dnd_drop)
+            except Exception as _dnd_err:
+                print(f"⚠️ Drag-and-drop init failed: {_dnd_err}")
         
         # Initialize zoom/pan state (kept in central state)
         self.is_panning = False
         self.last_mouse_pos = None
         self.last_loaded_path = None  # Track loaded file for export
+        self.last_import_dir = os.path.expanduser("~")  # Remember last folder
         if not self.use_gl:
             self.canvas.focus_set()  # Allow canvas to receive key events
         
         # Brush cursor state
         self.brush_cursor_id = None
         self.cursor_visible = False
+        self._last_mouse_x = None  # last known mouse position for cursor redraw
+        self._last_mouse_y = None
         
         # Throttle/quality controls for zoom rendering on Tk canvas
         self._zoom_redraw_job = None
@@ -468,6 +490,14 @@ class SpotlessFilmModern:
                                        font=ctk.CTkFont(size=12), text_color="#CCCCCC")
         self.timer_label.pack(side="right", padx=(0, 20))
         
+        # Undo button
+        self.undo_btn = ctk.CTkButton(overlay_frame, text="↩ Deshacer", width=110, height=35,
+                                     command=self.undo_removal,
+                                     font=ctk.CTkFont(size=11),
+                                     fg_color="#555555", hover_color="#666666",
+                                     state="disabled")
+        self.undo_btn.pack(side="right", padx=(0, 10))
+
         # Export button
         self.export_btn = ctk.CTkButton(overlay_frame, text="💾 Export", width=80, height=35,
                                        command=self.export_full_resolution,
@@ -659,10 +689,14 @@ class SpotlessFilmModern:
         if self.state.view_state.tool_mode == ToolMode.ERASER and self.state.dust_mask is not None:
             cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
             self.apply_eraser_at_point((event.x, event.y), cw, ch)
+            ex, ey = event.x, event.y
+            self.canvas.after_idle(lambda x=ex, y=ey: self.update_brush_cursor(x, y))
             return
         if self.state.view_state.tool_mode == ToolMode.BRUSH and self.state.dust_mask is not None:
             cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
             self.apply_brush_at_point((event.x, event.y), cw, ch)
+            ex, ey = event.x, event.y
+            self.canvas.after_idle(lambda x=ex, y=ey: self.update_brush_cursor(x, y))
             return
 
         if self.state.view_state.processing_mode == ProcessingMode.SPLIT_SLIDER and hasattr(self, 'photo_split'):
@@ -708,10 +742,14 @@ class SpotlessFilmModern:
 
         # Tool drags (only when space is not pressed)
         if self.state.view_state.tool_mode == ToolMode.ERASER and self.state.dust_mask is not None:
+            self._last_mouse_x = event.x
+            self._last_mouse_y = event.y
             cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
             self.apply_eraser_at_point((event.x, event.y), cw, ch)
             return
         if self.state.view_state.tool_mode == ToolMode.BRUSH and self.state.dust_mask is not None:
+            self._last_mouse_x = event.x
+            self._last_mouse_y = event.y
             cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
             self.apply_brush_at_point((event.x, event.y), cw, ch)
             return
@@ -762,14 +800,18 @@ class SpotlessFilmModern:
     
     def display_single_view(self, canvas_width, canvas_height, image=None):
         """Display single image view"""
-        # Smart image selection - prefer processed image if available
         if image is None:
-            if self.state.processed_image:
+            # Show original+overlay when dust mask exists and overlay is visible,
+            # so the red marks are always visible after detection.
+            # Only switch to processed image when overlay is explicitly hidden.
+            overlay_on = (self.state.dust_mask is not None and
+                          getattr(self, 'overlay_visible', True))
+            if self.state.processed_image and not overlay_on:
                 image = self.preview_processed_image or self.state.processed_image
-                print("🖼️ Single view: Using processed image")
+                print("🖼️ Single view: Using processed image (overlay off)")
             else:
                 image = self.preview_selected_image or self.state.selected_image
-                print("🖼️ Single view: Using selected image")
+                print("🖼️ Single view: Using original (overlay visible or no result yet)")
         else:
             print(f"🖼️ Single view: Using provided image")
         
@@ -779,14 +821,10 @@ class SpotlessFilmModern:
         # Create working image from chosen source (preview/full)
         display_image = image.copy()
         
-        # Determine if we're showing processed (for info; we now allow overlay on both)
-        is_processed_display = (
-            (self.state.processed_image is not None) and 
-            (image is self.preview_processed_image or image is self.state.processed_image)
-        )
+        is_processed_display = False  # overlay always shown on original now
         
-        # Compute base fit size within margins
-        margin = 40
+        # Fit image to full canvas (no margin, consistent with split view)
+        margin = 0
         base_w = canvas_width - margin
         base_h = canvas_height - margin
         img_ratio = display_image.size[0] / display_image.size[1]
@@ -812,25 +850,28 @@ class SpotlessFilmModern:
         center_x = canvas_width // 2 + int(off_x)
         center_y = canvas_height // 2 + int(off_y)
 
-        # Convert to PhotoImage
+        # Convert to PhotoImage — composite overlay directly onto image (fixes tkinter RGBA blending)
+        if (self.state.dust_mask and getattr(self, 'overlay_visible', True)):
+            display_image = self._composite_overlay_on_image(display_image, (disp_w, disp_h))
+            self.overlay_item_id = None
+        else:
+            self.overlay_item_id = None
+
         self.photo = ImageTk.PhotoImage(display_image)
 
         # Display image centered with pan offset
         self.image_item_id = self.canvas.create_image(center_x, center_y, image=self.photo)
 
-        # If overlay visible, render as a separate canvas image for speed
-        if (self.state.dust_mask and getattr(self, 'overlay_visible', True)):
-            overlay_img = self.create_overlay_layer((disp_w, disp_h))
-            if overlay_img is not None:
-                self.photo_overlay = ImageTk.PhotoImage(overlay_img)
-                self.overlay_item_id = self.canvas.create_image(center_x, center_y, image=self.photo_overlay)
-            else:
-                self.overlay_item_id = None
-        else:
-            self.overlay_item_id = None
-
         # Store bounds for hit-testing/brush mapping (top-left, size)
         self.image_item_bounds = (center_x - disp_w // 2, center_y - disp_h // 2, disp_w, disp_h)
+
+        # Always redraw brush circle on top after every canvas refresh
+        if (not self.use_gl and hasattr(self.state, 'view_state') and
+                self.state.view_state.tool_mode in (ToolMode.BRUSH, ToolMode.ERASER)):
+            mx = getattr(self, '_last_mouse_x', None)
+            my = getattr(self, '_last_mouse_y', None)
+            if mx is not None and my is not None:
+                self.update_brush_cursor(mx, my)
     
     def display_side_by_side_view(self, canvas_width, canvas_height):
         """Display side-by-side comparison view"""
@@ -899,9 +940,9 @@ class SpotlessFilmModern:
         if self.state.dust_mask and getattr(self, 'overlay_visible', True):
             base_original = self.create_overlay_image(base_original)
 
-        # Calculate base fit size while maintaining aspect ratio
-        display_width = canvas_width - 40
-        display_height = canvas_height - 40
+        # Calculate base fit size — no margin, fill canvas fully
+        display_width = canvas_width
+        display_height = canvas_height
         img_ratio = base_original.size[0] / base_original.size[1]
         canvas_ratio = display_width / display_height
         if img_ratio > canvas_ratio:
@@ -1057,23 +1098,38 @@ class SpotlessFilmModern:
             return base_image
 
     def create_overlay_layer(self, display_size):
-        """Fast path: build an RGBA overlay at display size only."""
+        """Build an RGBA overlay at display size. Returns RGBA image for compositing."""
         try:
             if not self.state.dust_mask:
                 return None
-            # Always base overlay on the full-res mask and scale to the current display size
             mask = self.state.dust_mask
             if mask.size != display_size:
                 mask = mask.resize(display_size, Image.Resampling.NEAREST)
             mask_array = np.array(mask.convert('L'), dtype=np.uint8)
+            # overlay_opacity controls how strong the red tint is (0=invisible, 1=solid red)
             alpha = float(getattr(self, 'overlay_opacity', 0.5))
+            # Alpha channel: only where dust is detected, scaled by opacity
             a = (mask_array.astype(np.float32) * alpha).clip(0, 255).astype(np.uint8)
             rgb = np.zeros((display_size[1], display_size[0], 3), dtype=np.uint8)
-            rgb[:, :, 0] = mask_array  # red
+            rgb[:, :, 0] = mask_array  # red channel
             rgba = np.dstack([rgb, a])
             return Image.fromarray(rgba, 'RGBA')
         except Exception:
             return None
+
+    def _composite_overlay_on_image(self, base_img_rgb, display_size):
+        """Composite the dust overlay directly onto the base image (fixes tkinter RGBA issue)."""
+        try:
+            overlay = self.create_overlay_layer(display_size)
+            if overlay is None:
+                return base_img_rgb
+            # Paste RGBA overlay using its alpha as mask
+            result = base_img_rgb.convert('RGBA')
+            result.paste(overlay, (0, 0), mask=overlay.split()[3])
+            return result.convert('RGB')
+        except Exception as e:
+            print(f"Overlay composite error: {e}")
+            return base_img_rgb
 
     # MARK: - Zoom / Pan Controls
 
@@ -1203,6 +1259,18 @@ class SpotlessFilmModern:
         # End brush stroke if any tool is active
         if self.state.view_state.tool_mode in (ToolMode.BRUSH, ToolMode.ERASER):
             self.state.end_brush_stroke()
+            # Redraw circle after display_image finishes (after_idle ensures correct order)
+            try:
+                self.canvas.config(cursor="none")
+                ex, ey = event.x, event.y
+                self.canvas.after_idle(lambda x=ex, y=ey: self.update_brush_cursor(x, y))
+            except Exception:
+                pass
+        else:
+            try:
+                self.canvas.config(cursor="")
+            except Exception:
+                pass
 
     def update_zoom_ui(self):
         """Update zoom label and button states to reflect current zoom"""
@@ -1229,6 +1297,8 @@ class SpotlessFilmModern:
             self.remove_btn.configure(state="normal" if has_dust_mask and not self.state.processing_state.is_removing else "disabled")
         if hasattr(self, 'export_btn'):
             self.export_btn.configure(state="normal" if has_processed else "disabled")
+        # Update undo button
+        self._update_undo_btn()
         
         # Show/Hide threshold slider (matches Swift app behavior)
         if hasattr(self, 'threshold_frame'):
@@ -1351,7 +1421,7 @@ class SpotlessFilmModern:
             print("🔵 Opening file dialog...")
             file_path = filedialog.askopenfilename(
                 title="Select Image",
-                initialdir=os.path.expanduser("~"),  # Start in home directory
+                initialdir=self.last_import_dir,  # Fix 2: remember last folder
                 filetypes=[
                     ("Image files", "*.jpg *.jpeg *.png *.tiff *.bmp"),
                     ("JPEG files", "*.jpg *.jpeg"),
@@ -1365,6 +1435,7 @@ class SpotlessFilmModern:
             
             if file_path and file_path.strip():  # Check for valid path
                 print(f"🔵 Valid file path, loading: {file_path}")
+                self.last_import_dir = os.path.dirname(file_path)  # Fix 2: save last dir
                 self.load_image(file_path)
             else:
                 print("🔵 No file selected or empty path")
@@ -1383,14 +1454,30 @@ class SpotlessFilmModern:
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
             
-            # Load image
+            # Load image — apply EXIF orientation so verticals display correctly
             image = Image.open(file_path)
+            try:
+                from PIL import ImageOps
+                image = ImageOps.exif_transpose(image)
+            except Exception:
+                pass
             self.state.selected_image = image
             # Store the file path for export functionality
             self.last_loaded_path = file_path
             # Build preview version for faster display
             self.preview_selected_image = self.build_preview_image(image)
             self.state.reset_processing()
+            self._processed_history.clear()  # fresh image = fresh undo history
+            self.preview_processed_image = None
+            self.state.processed_image = None  # never bleed result from previous image
+            # Reset view to Single so split/side-by-side from previous image doesn't bleed in
+            self.set_view_mode(ProcessingMode.SINGLE)
+            if hasattr(self, 'view_cycle_btn'):
+                self.view_cycle_btn.configure(text="🔍 Single")
+            # Reset overlay to visible for fresh detection
+            self.overlay_visible = True
+            if hasattr(self, 'overlay_toggle_btn'):
+                self.overlay_toggle_btn.configure(text="👁 Overlay", fg_color="#007AFF")
             
             filename = os.path.basename(file_path)
             print(f"✅ Image loaded: {filename} ({image.size[0]}x{image.size[1]})")
@@ -1489,10 +1576,12 @@ class SpotlessFilmModern:
                 start_time = time.time()
                 
                 # Use the exact prediction method from main.ipynb
+                # Fix: use the actual threshold from the slider (not hardcoded 0.5)
+                current_threshold = float(self.state.processing_state.threshold)
                 result = ImageProcessingService.predict_dust_mask(
                     self.state.unet_model,
                     self.state.selected_image,
-                    threshold=0.5,  # Default threshold, will be adjustable
+                    threshold=current_threshold,
                     window_size=1024,
                     stride=512,
                     device=self.state.device,
@@ -1627,7 +1716,7 @@ class SpotlessFilmModern:
         
         # Dilate mask for better coverage
         print("🎨 Dilating mask...")
-        dilated_mask = ImageProcessingService.dilate_mask(self.state.dust_mask)
+        dilated_mask = ImageProcessingService.dilate_mask(self.state.dust_mask, kernel_size=3)
         
         # Convert to RGB for processing
         print("🎨 Converting image to RGB...")
@@ -1642,6 +1731,13 @@ class SpotlessFilmModern:
         final_result = ImageProcessingService.blend_images(
             image_rgb, inpainted, dilated_mask
         )
+        # Push previous result to undo history before replacing
+        if self.state.processed_image is not None:
+            entry = (self.state.processed_image, self.preview_processed_image)
+            self._processed_history.append(entry)
+            if len(self._processed_history) > self._MAX_UNDO:
+                self._processed_history.pop(0)
+
         # Build preview for processed image
         self.preview_processed_image = self.build_preview_image(final_result)
         
@@ -1657,7 +1753,7 @@ class SpotlessFilmModern:
         mask_np = np.array(mask.convert('L'))
         
         print(f"🔍 Image shape: {image_np.shape}, Mask shape: {mask_np.shape}")
-        result = cv2.inpaint(image_np, mask_np, inpaintRadius=5, flags=cv2.INPAINT_TELEA)
+        result = cv2.inpaint(image_np, mask_np, inpaintRadius=3, flags=cv2.INPAINT_TELEA)
         print("✅ CV2 single-pass inpainting completed (radius=5)")
         return Image.fromarray(result)
     
@@ -1706,7 +1802,7 @@ class SpotlessFilmModern:
         print(f"🖼️ Switching to {mode} view mode")
         self.state.set_processing_mode(mode)
         # Update button states
-        self.update_view_buttons()
+        self.update_tool_buttons()
         # Force immediate display update
         self.display_image()
     
@@ -1744,7 +1840,7 @@ class SpotlessFilmModern:
         # Global shortcuts
         self.root.bind('<Control-o>', lambda e: self.import_image())
         self.root.bind('<Control-s>', lambda e: self.export_image())
-        self.root.bind('<Control-z>', lambda e: self.undo_mask_change())
+        self.root.bind('<Control-z>', lambda e: self.undo_removal())
         # macOS Command+Z and Meta+Z fallback
         self.root.bind('<Command-z>', lambda e: self.undo_mask_change())
         self.root.bind('<Meta-z>', lambda e: self.undo_mask_change())
@@ -1832,9 +1928,37 @@ class SpotlessFilmModern:
         self.state.set_processing_mode(next_mode)
     
     def undo_mask_change(self):
-        """Undo last mask change"""
+        """Undo last mask change (brush/eraser strokes)"""
         if self.state.can_undo:
             self.state.undo_last_mask_change()
+
+    def undo_removal(self):
+        """Undo last Remove Dust operation — restore previous processed image"""
+        if not self._processed_history:
+            # Nothing to undo on processed; try mask undo instead
+            self.undo_mask_change()
+            return
+        prev_processed, prev_preview = self._processed_history.pop()
+        self.state.processed_image = prev_processed
+        self.preview_processed_image = prev_preview
+        self.status_label.configure(text="↩ Resultado anterior restaurado")
+        self._update_undo_btn()
+        self.update_ui()
+
+    def _update_undo_btn(self):
+        """Update undo button state and tooltip text"""
+        if not hasattr(self, "undo_btn"):
+            return
+        has_removal_history = bool(self._processed_history)
+        has_mask_history = getattr(self.state, "can_undo", False)
+        enabled = has_removal_history or has_mask_history
+        self.undo_btn.configure(state="normal" if enabled else "disabled")
+        if has_removal_history:
+            self.undo_btn.configure(text="↩ Deshacer resultado")
+        elif has_mask_history:
+            self.undo_btn.configure(text="↩ Deshacer pincel")
+        else:
+            self.undo_btn.configure(text="↩ Deshacer")
     
     def on_threshold_changed(self, value):
         """Handle real-time threshold slider changes (matches Swift app)"""
@@ -2120,6 +2244,8 @@ class SpotlessFilmModern:
     
     def on_mouse_motion(self, event):
         """Handle mouse motion for brush cursor"""
+        self._last_mouse_x = event.x  # always track position
+        self._last_mouse_y = event.y
         if not self.use_gl and hasattr(self.state, 'view_state') and self.state.view_state.tool_mode in (ToolMode.BRUSH, ToolMode.ERASER):
             self.update_brush_cursor(event.x, event.y)
         else:
@@ -2188,6 +2314,14 @@ class SpotlessFilmModern:
             self.brush_cursor_id = None
             self.cursor_visible = False
     
+    def _on_canvas_leave(self, event):
+        """Restore normal arrow cursor when mouse leaves the canvas area"""
+        self.hide_brush_cursor()
+        try:
+            self.canvas.config(cursor="")  # always restore arrow on leave
+        except Exception:
+            pass
+
     def update_cursor_for_tool_change(self):
         """Update cursor when tool mode changes"""
         if not self.use_gl and hasattr(self, 'canvas'):
@@ -2236,6 +2370,205 @@ class SpotlessFilmModern:
             self.processing_task.join(timeout=5.0)
         
         print("✨ Spotless Film App closed")
+
+    def _on_dnd_drop(self, event):
+        """Handle drag-and-drop onto the canvas (Fix 1)"""
+        raw = event.data
+        # tkinterdnd2 wraps paths with spaces in braces, e.g. {/path/to/my file.jpg}
+        # Split respecting brace-quoted tokens
+        import re
+        tokens = re.findall(r'\{[^}]*\}|\S+', raw)
+        paths = [t.strip('{}') for t in tokens]
+        valid_exts = ('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp')
+        for path in paths:
+            if path.lower().endswith(valid_exts):
+                self.last_import_dir = os.path.dirname(path)  # Also update last dir
+                self.load_image(path)
+                return
+        messagebox.showerror("Error", "Please drop a valid image file (JPG, PNG, TIFF, BMP)")
+
+    def process_folder(self):
+        """Process all images in a folder — with event-based sync (Fix 3 & 4)"""
+        import threading as _threading
+
+        # Fix 2 (also for folder): use last_import_dir and update it
+        folder = filedialog.askdirectory(
+            title="Seleccionar carpeta con imágenes",
+            initialdir=self.last_import_dir
+        )
+        if not folder:
+            return
+        self.last_import_dir = folder  # Remember this folder too
+
+        images = [
+            f for f in os.listdir(folder)
+            if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp'))
+        ]
+        if not images:
+            messagebox.showinfo("Sin imágenes", "No se encontraron imágenes en la carpeta.")
+            return
+
+        output_folder = os.path.join(folder, "spotless_output")
+        os.makedirs(output_folder, exist_ok=True)
+
+        # Ask user: auto-process all, or pause between images?
+        auto_mode = messagebox.askyesno(
+            "Modo de procesamiento",
+            "¿Procesar todas las imágenes automáticamente?\n\n"
+            "Sí → Procesa y guarda todas sin parar.\n"
+            "No → Muestra cada imagen para que ajustes y confirmes antes de continuar."
+        )
+
+        def _wait_for_detection(timeout=60):
+            """Block until detection finishes or timeout (Fix 3 & 4)"""
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if not self.state.processing_state.is_detecting:
+                    return True
+                time.sleep(0.2)
+            return False  # timed out
+
+        def _wait_for_removal(timeout=120):
+            """Block until removal finishes or timeout (Fix 3 & 4)"""
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if not self.state.processing_state.is_removing:
+                    return True
+                time.sleep(0.2)
+            return False  # timed out
+
+        def batch_process():
+            self.root.after_idle(lambda: self.batch_btn.configure(state="disabled"))
+            saved = 0
+            skipped = 0
+
+            for i, filename in enumerate(images):
+                img_path = os.path.join(folder, filename)
+                self.root.after_idle(
+                    lambda t=f"Procesando {i+1}/{len(images)}: {filename}":
+                    self.status_label.configure(text=t)
+                )
+
+                try:
+                    # Step 1: load image
+                    self.root.after_idle(lambda p=img_path: self.load_image(p))
+                    time.sleep(0.5)
+                    deadline = time.time() + 10
+                    while self.state.selected_image is None and time.time() < deadline:
+                        time.sleep(0.1)
+
+                    # Step 2: detect dust
+                    self.root.after_idle(self.detect_dust)
+                    time.sleep(0.3)
+                    if not _wait_for_detection(timeout=60):
+                        print(f"⚠️ Detection timed out: {filename}")
+                        skipped += 1
+                        continue
+
+                    if not auto_mode:
+                        # Step 3 (manual): non-blocking floating panel — user keeps full UI access
+                        confirmed = _threading.Event()
+                        confirmed._skip = False
+
+                        def _show_confirm_panel(fname=filename, ev=confirmed, idx=i):
+                            panel = ctk.CTkToplevel(self.root)
+                            panel.title("")
+                            panel.geometry("360x180")
+                            panel.resizable(False, False)
+                            panel.attributes("-topmost", True)
+                            # No grab_set() — keeps main window fully interactive
+                            try:
+                                rx = self.root.winfo_x() + self.root.winfo_width() - 380
+                                ry = self.root.winfo_y() + self.root.winfo_height() - 210
+                                panel.geometry(f"360x180+{rx}+{ry}")
+                            except Exception:
+                                pass
+
+                            ctk.CTkLabel(
+                                panel,
+                                text=f"📷 {idx+1}/{len(images)}: {fname}",
+                                font=ctk.CTkFont(size=12, weight="bold"),
+                                wraplength=330
+                            ).pack(padx=15, pady=(15, 4))
+
+                            ctk.CTkLabel(
+                                panel,
+                                text="Polvo detectado ✔  Ajustá sensibilidad y pinceles libremente.\nCuando estés listo, elegí:",
+                                font=ctk.CTkFont(size=11),
+                                text_color="#AAAAAA",
+                                wraplength=330,
+                                justify="center"
+                            ).pack(padx=15, pady=(0, 12))
+
+                            btn_frame = ctk.CTkFrame(panel, fg_color="transparent")
+                            btn_frame.pack(fill="x", padx=15, pady=(0, 15))
+
+                            def _proceed():
+                                ev._skip = False
+                                panel.destroy()
+                                ev.set()
+
+                            def _skip_img():
+                                ev._skip = True
+                                panel.destroy()
+                                ev.set()
+
+                            ctk.CTkButton(
+                                btn_frame, text="✅ Eliminar y guardar",
+                                command=_proceed,
+                                fg_color="#28A745", hover_color="#1E7E34",
+                                font=ctk.CTkFont(size=12)
+                            ).pack(side="left", expand=True, padx=(0, 6))
+
+                            ctk.CTkButton(
+                                btn_frame, text="⏭ Saltar",
+                                command=_skip_img,
+                                fg_color="#555555", hover_color="#666666",
+                                font=ctk.CTkFont(size=12)
+                            ).pack(side="left", expand=True)
+
+                        self.root.after_idle(_show_confirm_panel)
+                        confirmed.wait(timeout=600)  # 10 min max
+
+                        if confirmed._skip:
+                            print(f"⏭ Saltado: {filename}")
+                            skipped += 1
+                            continue
+
+                    # Step 4: remove dust (only after confirmation in manual, or always in auto)
+                    self.root.after_idle(self.remove_dust)
+                    time.sleep(0.3)
+                    if not _wait_for_removal(timeout=120):
+                        print(f"⚠️ Removal timed out: {filename}")
+                        skipped += 1
+                        continue
+
+                    # Step 5: save
+                    output_path = os.path.join(output_folder, filename)
+                    if self.state.processed_image is not None:
+                        self.state.processed_image.save(output_path, quality=95)
+                        print(f"✅ Guardado: {output_path}")
+                        saved += 1
+                    else:
+                        print(f"⚠️ Sin resultado para: {filename}")
+                        skipped += 1
+
+                except Exception as e:
+                    print(f"❌ Error procesando {filename}: {e}")
+                    skipped += 1
+
+            def _done():
+                self.batch_btn.configure(state="normal")
+                self.status_label.configure(
+                    text=f"✅ Listo. {saved} guardadas, {skipped} saltadas → spotless_output/"
+                )
+                messagebox.showinfo(
+                    "Proceso terminado",
+                    f"Guardadas: {saved}\nSaltadas/con error: {skipped}\n\nCarpeta: {output_folder}"
+                )
+            self.root.after_idle(_done)
+
+        _threading.Thread(target=batch_process, daemon=True).start()
 
 
 def main():

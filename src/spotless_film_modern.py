@@ -452,7 +452,7 @@ class SpotlessFilmModern:
                                                  font=ctk.CTkFont(size=11), text_color="#CCCCCC")
         self.brush_size_label_text.pack(side="left")
         
-        self.brush_size_slider = ctk.CTkSlider(self.brush_size_frame, from_=5, to=100, width=120,
+        self.brush_size_slider = ctk.CTkSlider(self.brush_size_frame, from_=1, to=100, width=120,
                                               command=self.on_brush_size_changed)
         self.brush_size_slider.set(10)  # Initialize to default brush size
         self.brush_size_slider.pack(side="left", padx=(8, 8))
@@ -686,18 +686,26 @@ class SpotlessFilmModern:
             return
 
         # Tool interactions (only when space is not pressed)
-        if self.state.view_state.tool_mode == ToolMode.ERASER and self.state.dust_mask is not None:
-            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            self.apply_eraser_at_point((event.x, event.y), cw, ch)
-            ex, ey = event.x, event.y
-            self.canvas.after_idle(lambda x=ex, y=ey: self.update_brush_cursor(x, y))
-            return
-        if self.state.view_state.tool_mode == ToolMode.BRUSH and self.state.dust_mask is not None:
-            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            self.apply_brush_at_point((event.x, event.y), cw, ch)
-            ex, ey = event.x, event.y
-            self.canvas.after_idle(lambda x=ex, y=ey: self.update_brush_cursor(x, y))
-            return
+        if self.state.view_state.tool_mode == ToolMode.ERASER:
+            if self.state.dust_mask is None and self.state.selected_image:
+                self.state.dust_mask = Image.new('L', self.state.selected_image.size, 0)
+                self.state.create_low_res_mask()
+            if self.state.dust_mask is not None:
+                cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+                self.apply_eraser_at_point((event.x, event.y), cw, ch)
+                ex, ey = event.x, event.y
+                self.canvas.after_idle(lambda x=ex, y=ey: self.update_brush_cursor(x, y))
+                return
+        if self.state.view_state.tool_mode == ToolMode.BRUSH:
+            if self.state.dust_mask is None and self.state.selected_image:
+                self.state.dust_mask = Image.new('L', self.state.selected_image.size, 0)
+                self.state.create_low_res_mask()
+            if self.state.dust_mask is not None:
+                cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+                self.apply_brush_at_point((event.x, event.y), cw, ch)
+                ex, ey = event.x, event.y
+                self.canvas.after_idle(lambda x=ex, y=ey: self.update_brush_cursor(x, y))
+                return
 
         if self.state.view_state.processing_mode == ProcessingMode.SPLIT_SLIDER and hasattr(self, 'photo_split'):
             canvas_width = self.canvas.winfo_width()
@@ -741,18 +749,30 @@ class SpotlessFilmModern:
             return
 
         # Tool drags (only when space is not pressed)
-        if self.state.view_state.tool_mode == ToolMode.ERASER and self.state.dust_mask is not None:
-            self._last_mouse_x = event.x
-            self._last_mouse_y = event.y
-            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            self.apply_eraser_at_point((event.x, event.y), cw, ch)
-            return
-        if self.state.view_state.tool_mode == ToolMode.BRUSH and self.state.dust_mask is not None:
-            self._last_mouse_x = event.x
-            self._last_mouse_y = event.y
-            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            self.apply_brush_at_point((event.x, event.y), cw, ch)
-            return
+        if self.state.view_state.tool_mode == ToolMode.ERASER:
+            if self.state.dust_mask is None and self.state.selected_image:
+                self.state.dust_mask = Image.new('L', self.state.selected_image.size, 0)
+                self.state.create_low_res_mask()
+            if self.state.dust_mask is not None:
+                self._last_mouse_x = event.x
+                self._last_mouse_y = event.y
+                cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+                self.apply_eraser_at_point((event.x, event.y), cw, ch)
+                self.canvas.delete("brush_cursor")
+                self.canvas.after_idle(lambda x=event.x, y=event.y: self.update_brush_cursor(x, y))
+                return
+        if self.state.view_state.tool_mode == ToolMode.BRUSH:
+            if self.state.dust_mask is None and self.state.selected_image:
+                self.state.dust_mask = Image.new('L', self.state.selected_image.size, 0)
+                self.state.create_low_res_mask()
+            if self.state.dust_mask is not None:
+                self._last_mouse_x = event.x
+                self._last_mouse_y = event.y
+                cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+                self.apply_brush_at_point((event.x, event.y), cw, ch)
+                self.canvas.delete("brush_cursor")
+                self.canvas.after_idle(lambda x=event.x, y=event.y: self.update_brush_cursor(x, y))
+                return
 
         # Otherwise, handle split slider dragging directly
         if self.state.view_state.processing_mode == ProcessingMode.SPLIT_SLIDER and hasattr(self, 'photo_split'):
@@ -2254,52 +2274,51 @@ class SpotlessFilmModern:
     def update_brush_cursor(self, x, y):
         """Update brush cursor position and size"""
         if self.use_gl or not hasattr(self, 'canvas'):
-            return  # Skip for OpenGL view or if canvas not ready
-            
-        # Hide old cursor
-        if self.brush_cursor_id:
-            try:
-                self.canvas.delete(self.brush_cursor_id)
-            except:
-                pass
-        
-        # Get brush size (actual pixel size regardless of zoom)
-        brush_size = getattr(self.state.view_state, 'brush_size', 20)
-        
-        # Scale brush size by current zoom level to show actual size on image
+            return
+
+        # Delete previous cursor efficiently by tag
+        self.canvas.delete("brush_cursor")
+        self.brush_cursor_id = None
+
+        # Brush size in image pixels — map to canvas pixels accounting for zoom
+        brush_size = getattr(self.state.view_state, 'brush_size', 10)
         zoom_scale = getattr(self.state.view_state, 'zoom_scale', 1.0)
-        display_size = int(brush_size * zoom_scale)
-        
-        # Ensure minimum visibility (at least 4 pixels) and maximum reasonable size (200 pixels)
-        display_size = max(4, min(200, display_size))
-        
-        # Create cursor circle
-        x1 = x - display_size // 2
-        y1 = y - display_size // 2
-        x2 = x + display_size // 2
-        y2 = y + display_size // 2
-        
-        # Red colors for both brush and eraser (Tkinter compatible colors)
+
+        # The radius used when painting is brush_size/2 in image pixels.
+        # On canvas those image pixels are scaled by zoom_scale AND by the
+        # fit-scale (how the image was resized to fit the canvas).
+        # Approximate the fit-scale from image_item_bounds if available.
+        fit_scale = 1.0
+        if hasattr(self, 'image_item_bounds') and self.image_item_bounds and self.state.selected_image:
+            _, _, disp_w, disp_h = self.image_item_bounds
+            orig_w, orig_h = self.state.selected_image.size
+            if orig_w > 0 and orig_h > 0:
+                fit_scale = min(disp_w / orig_w, disp_h / orig_h)
+
+        radius_canvas = max(1, int(brush_size * fit_scale / 2))
+
+        x1 = x - radius_canvas
+        y1 = y - radius_canvas
+        x2 = x + radius_canvas
+        y2 = y + radius_canvas
+
         if self.state.view_state.tool_mode == ToolMode.BRUSH:
-            outline_color = "#DC143C"  # Crimson red
-            fill_color = "#FFB6C1"  # Light pink (low opacity effect)
-        else:  # ERASER
-            outline_color = "#B22222"  # Fire brick red
-            fill_color = "#FFA0A0"  # Light red (low opacity effect)
-        
+            outline_color = "#00FF00"  # Green for brush
+        else:
+            outline_color = "#FF4444"  # Red for eraser
+
         try:
             self.brush_cursor_id = self.canvas.create_oval(
                 x1, y1, x2, y2,
-                outline=outline_color, 
-                fill=fill_color,
-                width=2,
-                dash=(5, 3),  # Dashed line for better visibility
-                tags="brush_cursor"  # Add tag for easier management
+                outline=outline_color,
+                fill="",           # Transparent fill so image is visible
+                width=1,
+                dash=(4, 2),
+                tags="brush_cursor"
             )
             self.cursor_visible = True
-            print(f"Brush cursor created: {self.state.view_state.tool_mode}, size: {display_size}")
-        except Exception as e:
-            print(f"Error creating brush cursor: {e}")
+        except Exception:
+            pass
     
     def hide_brush_cursor(self):
         """Hide the brush cursor"""

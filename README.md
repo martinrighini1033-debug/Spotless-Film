@@ -1,125 +1,83 @@
-# Spotless Film: Dust Removal for Scanned Film Photographs
+# Spotless Film — Windows Port + Improvements
 
-## Announcement
-
-I’ve been working on EmberFilm, a standalone professional app for end-to-end film negative conversion.
-
-* GPU-accelerated negative conversion
-* Advanced AI dust detection and removal
-* Auto-cropping for scans
-* Intelligent color rendering and print profiles
-* Real-time non-destructive editing
-* Fast workflow designed to preserve the character and grain of film
-
-And much more still in development.
-
-Here’s a sneak peek:
-
-![EmberFilm preview](examples/EmberFilm-SneakPeek.png)
-
-Want to try the beta version? or know when it's launched? Fill out this form to be put on the waitlist, and feel free to leave any feature requests:
-
-https://forms.gle/weJ3GKrQo3b7kVU57
+> Fork of [yahyarahhawi/Spotless-Film](https://github.com/yahyarahhawi/Spotless-Film)  
+> An AI-powered dust removal tool for scanned film negatives, now running on Windows with a trained model and several new features.
 
 ---
-A complete dust removal pipeline for scanned film photographs using deep learning. The system combines **U-Net dust detection** with **LaMa deep learning inpainting** for state-of-the-art film restoration.
 
+## What's new in this fork
 
-![App Preview](docs/app-img.jpg)
+### 🪟 Windows compatibility
+The original project was built for macOS (relying on Apple's MPS/Metal backend). This fork runs fully on Windows:
+- Automatic detection of CUDA (NVIDIA GPU) with CPU fallback
+- Removed macOS-exclusive dependencies
 
-[![Download for macOS](https://img.shields.io/badge/Download-macOS-blue?logo=apple&style=for-the-badge)](https://github.com/yahyarahhawi/Spotless-Film/releases/download/v1.1.1/Spotless-Film.dmg)
+### 🧠 Trained model included
+The original repository was missing the `.pth` weights file. This fork includes a trained U-Net model ready to use — no training required to get started.
 
+> **Download the model weights:** [Google Drive link] *([https://drive.google.com/file/d/1Faw8rt73mSEqlsTSN9ra0nM88Iy3rXli/view?usp=drive_link])*  
+> Place the `.pth` file in the `dust_remover/` folder before running.
 
-If you simply want to use it as a standalone app, feel free to download this simple photo editor I made for macos. 
+### 🖼️ Batch processing
+- New **"Process Folder"** button to process entire folders of images
+- **Automatic mode:** processes and saves all images without interruption
+- **Manual mode:** pauses on each image with a floating (non-blocking) panel, letting you adjust sensitivity and brushes before confirming — the main window stays fully interactive while the panel is open
+- Real synchronization between stages (detection → removal → save) using `threading.Event` instead of fixed `time.sleep`, ensuring all images are saved correctly
+- Results are saved to a `spotless_output/` subfolder
 
-![App Preview](docs/app-preview.png)
+### 📂 Improved file selection
+- Remembers the last folder used when opening images
+- Drag & drop support directly onto the canvas
 
-## Release note: v1.1:
+### 🔴 Detection overlay
+- The red dust overlay now appears immediately after detection, without needing to click "Remove Dust" first
+- Fixed RGBA compositing so the overlay blends correctly in tkinter
+- Opacity slider now works correctly
 
-**New Features:**
+### 🎨 Brush and eraser tools
+- The brush/eraser preview circle stays visible at all times, including while painting with the mouse button held down (similar to Photoshop behavior)
+- Mouse cursor is correctly restored when leaving the image area
+- Fixed a bug where the cursor would disappear permanently after using a tool
 
-- Support for AdobeRGB import and export
-- Support for 16-bit color depth
-- Replaced PNG export with TIFF and JPEG
+### ↩️ Undo support
+- New **"↩ Undo"** button in the top toolbar
+- Stores up to 5 previous "Remove Dust" results
+- `Ctrl+Z` undoes the last processed result, or the last brush stroke if no results are stacked
+- History is cleared when loading a new image
 
-**Bug Fixes**
-- Fixed bugs related to blurry mask when changing dust detection sensitivity
+### 🔧 Technical fixes
+- **Sensitivity slider now works:** the detection threshold was previously hardcoded at `0.5`, ignoring the slider entirely — now it reads the actual value
+- **Letterbox padding:** images are resized to the U-Net input preserving aspect ratio (previously they were squeezed to 1024×1024, distorting proportions and causing false positives)
+- **Reduced mask dilation:** `kernel_size=3` and `inpaintRadius=3` to prevent inpainting from bleeding into neighboring areas like textures or edges
+- **EXIF orientation:** images are automatically displayed with the correct rotation
+- **Clean state between images:** when loading a new image, processed result, undo history, and view mode are all properly reset
+- **Split view:** the before/after slider now covers the full image edge to edge
 
-**Performance Improvements:**
-- Performance boost and better utilization of GPU acceleration
+---
 
+## Known limitations / future work
 
-## Key Features
+- The model still produces some false positives on high-contrast textures (ocean waves, reflections, patterned fabrics). This is a training data issue — adding more annotated negatives of these scenes will improve accuracy.
+- More training data is being collected to refine detection quality.
 
-- **Synthetic Training Data Generation**: Creates realistic dust patterns without manual annotation
-- **U-Net Architecture**: Optimized for 1024x1024 grayscale dust detection  
-- **LaMa Deep Learning Inpainting**: State-of-the-art texture synthesis for large dust areas
-- **Complete Pipeline**: End-to-end detection and inpainting workflow
-- **4x Expanded Dataset**: ~2400 diverse film photographs for training
-
-## Project Structure
-
-```
-├── main.ipynb              # Complete development workflow
-├── film-dataset/           # Training images (~2400 images)
-├── models/                 # Model checkpoints (.pth files)
-├── examples/               # Example input/output images
-├── src/                    # Application source code
-├── docs/                   # Documentation
-├── checkpoints/            # Additional model checkpoints
-└── CLAUDE.md              # Detailed implementation notes
-```
-
-## Quick Start
-
-1. **Training**: Open `main.ipynb` and run the notebook cells to train the U-Net model
-2. **Inference**: Use the patch-based inference pipeline for dust detection
-3. **Inpainting**: Apply LaMa or fallback CV2 methods for dust removal
-
-## Architecture
-
-### Synthetic Data Generation
-- Realistic dust patterns: elliptical blobs, linear scratches, squiggly hairs
-- Enhanced randomness with ±20% parameter variations
-- Per-element blur randomization for training diversity
-
-### U-Net Model
-- Encoder-decoder architecture for 1024x1024 grayscale images
-- Single input/output channel for dust probability maps
-- Skip connections for detail preservation
-- Improved training with dice_bce_loss()
-
-### Inference Pipeline
-- Patch-based processing with 1024x1024 patches
-- 512 stride (50% overlap) for seamless reconstruction
-- Weighted averaging for smooth results
-- Device-agnostic (MPS/CUDA/CPU support)
+---
 
 ## Requirements
 
-- PyTorch
-- NumPy
-- OpenCV
-- Pillow
-- LaMa-cleaner (optional, for deep learning inpainting)
+- Python 3.9+
+- PyTorch (CPU or CUDA)
+- See `requirements.txt` for full dependencies
 
-## Results
+## How to run (Windows)
 
-The system demonstrates significant improvements over traditional CV2 inpainting methods, especially for:
-- Large dust areas and complex textures
-- Film grain preservation
-- Natural texture synthesis
-- High-resolution image processing
-
-## Citation
-
-If you use this work in your research, please cite:
-
-```
-Spotless Film: Deep Learning Dust Removal for Scanned Film Photographs
-U-Net Architecture with Synthetic Training Data Generation
+```bash
+pip install -r requirements.txt
+python spotless_film_modern.py
 ```
 
-## License
+---
 
-MIT License - see LICENSE file for details.
+## Credits
+
+Original project by [yahyarahhawi](https://github.com/yahyarahhawi/Spotless-Film).  
+Windows port, model training, and feature additions by [martinrighini1033-debug](https://github.com/martinrighini1033-debug).

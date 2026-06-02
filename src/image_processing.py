@@ -189,11 +189,21 @@ class ImageProcessingService:
         orig_w, orig_h = image.size
         print(f"🔍 Input image size: {orig_w}x{orig_h}")
 
-        # Force-resize to 1024x1024 (squeezed if necessary)
+        # Fit image into 1024x1024 with letterbox padding (preserves aspect ratio)
+        # Squeezing distorts non-square images and causes false positives
         target = 1024
-        image_1024 = image.resize((target, target), Image.Resampling.BILINEAR)
+        scale = min(target / orig_w, target / orig_h)
+        fit_w = int(orig_w * scale)
+        fit_h = int(orig_h * scale)
+        image_fit = image.resize((fit_w, fit_h), Image.Resampling.BILINEAR)
 
-        img_np = np.array(image_1024, dtype=np.float32) / 255.0
+        # Pad to square with black (0) — model sees correct proportions
+        pad_left = (target - fit_w) // 2
+        pad_top  = (target - fit_h) // 2
+        canvas_1024 = Image.new('L', (target, target), 0)
+        canvas_1024.paste(image_fit, (pad_left, pad_top))
+
+        img_np = np.array(canvas_1024, dtype=np.float32) / 255.0
         tensor = torch.from_numpy(img_np).unsqueeze(0).unsqueeze(0).to(device)
 
         if progress_callback:
@@ -206,8 +216,9 @@ class ImageProcessingService:
         if progress_callback:
             progress_callback(0.7)
 
-        # Resize prediction back to original dimensions (stretch back)
-        up_pred = cv2.resize(pred_np, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        # Crop out only the padded region, then resize back to original dimensions
+        pred_crop = pred_np[pad_top:pad_top + fit_h, pad_left:pad_left + fit_w]
+        up_pred = cv2.resize(pred_crop, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
 
         if progress_callback:
             progress_callback(1.0)

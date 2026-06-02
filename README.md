@@ -1,5 +1,9 @@
 # Spotless Film — Windows Port + Improvements
 
+## Run in Google Colab
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/martinrighini1033-debug/Spotless-Film/blob/main/final_polvo.ipynb)
+
 > Fork of [yahyarahhawi/Spotless-Film](https://github.com/yahyarahhawi/Spotless-Film)  
 > An AI-powered dust removal tool for scanned film negatives, now running on Windows with a trained model and several new features.
 

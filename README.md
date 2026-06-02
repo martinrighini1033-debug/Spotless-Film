@@ -15,7 +15,7 @@ The original project was built for macOS (relying on Apple's MPS/Metal backend).
 ### 🧠 Trained model included
 The original repository was missing the `.pth` weights file. This fork includes a trained U-Net model ready to use — no training required to get started.
 
-> **Download the model weights:** [Google Drive link] *([https://drive.google.com/file/d/1Faw8rt73mSEqlsTSN9ra0nM88Iy3rXli/view?usp=drive_link])*  
+> **Download the model weights:** (Google Drive link) *([https://drive.google.com/file/d/1Faw8rt73mSEqlsTSN9ra0nM88Iy3rXli/view?usp=drive_link])*  
 > Place the `.pth` file in the `dust_remover/` folder before running.
 
 ### 🖼️ Batch processing
